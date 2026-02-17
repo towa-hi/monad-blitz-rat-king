@@ -72,6 +72,29 @@ contract PizzaRat is AccessControl {
         RoundEntry[] rounds;
     }
 
+    struct PlayerStateDump {
+        address player;
+        bool alive;
+        uint256 score;
+        bytes32 latestCommitHash;
+        RoundEntry[] roundHistory;
+        bytes32[] commitmentsByRound;
+        bool[] revealedByRound;
+    }
+
+    struct GameStateDump {
+        uint256 gameNumber;
+        Phase phase;
+        uint8 currentRound;
+        uint16 playerCount;
+        uint64 phaseDeadline;
+        uint256[NUM_INGREDIENTS] recipeWad;
+        address[] players;
+        uint16[] commitCountsByRound;
+        uint16[] revealCountsByRound;
+        PlayerStateDump[] playerStates;
+    }
+
     bytes32 public constant RELAYER_ROLE = keccak256("RELAYER_ROLE");
 
     uint8 public immutable minPlayers;
@@ -98,6 +121,7 @@ contract PizzaRat is AccessControl {
     mapping(uint256 gameNumber => mapping(uint8 round => uint16 count)) public commitCounts;
     mapping(uint256 gameNumber => mapping(uint8 round => uint16 count)) public revealCounts;
     mapping(uint256 gameNumber => mapping(address player => PlayerGameData gameData)) private playerData;
+    mapping(uint256 gameNumber => uint256[NUM_INGREDIENTS] recipeWad) private gameRecipeWad;
 
     event LobbyOpened(uint64 openedAt, uint64 closesAt);
     event LobbyClosed(uint16 playerCount, uint8 startingRound, uint64 commitDeadline);
@@ -159,6 +183,7 @@ contract PizzaRat is AccessControl {
         lobbyClosesAt = uint64(block.timestamp) + _lobbyDurationSeconds;
         phase = Phase.Lobby;
         currentRecipeWad = _defaultRecipeWad();
+        gameRecipeWad[currentGame] = currentRecipeWad;
 
         emit LobbyOpened(lobbyOpenedAt, lobbyClosesAt);
     }
@@ -175,6 +200,7 @@ contract PizzaRat is AccessControl {
             revert RecipeSumMustEqualOneWad(sum);
         }
         currentRecipeWad = recipeWad;
+        gameRecipeWad[currentGame] = recipeWad;
     }
 
     function join() external payable {
@@ -351,6 +377,37 @@ contract PizzaRat is AccessControl {
         return commitments[gameNumber][round][player];
     }
 
+    function getGameStateDump(uint256 gameNumber) external view returns (bytes memory) {
+        address[] storage gamePlayers = players[gameNumber];
+        uint256 playerLen = gamePlayers.length;
+        uint256 roundSlots = uint256(maxRounds) + 1;
+
+        GameStateDump memory snapshot;
+        snapshot.gameNumber = gameNumber;
+        snapshot.phase = gameNumber == currentGame ? phase : Phase.Ended;
+        snapshot.currentRound = gameNumber == currentGame ? currentRound : maxRounds;
+        snapshot.playerCount = gameNumber == currentGame ? playerCount : uint16(playerLen);
+        snapshot.phaseDeadline = gameNumber == currentGame ? phaseDeadline : 0;
+        snapshot.recipeWad = gameRecipeWad[gameNumber];
+        snapshot.players = new address[](playerLen);
+        snapshot.commitCountsByRound = new uint16[](roundSlots);
+        snapshot.revealCountsByRound = new uint16[](roundSlots);
+        snapshot.playerStates = new PlayerStateDump[](playerLen);
+
+        for (uint256 r = 1; r < roundSlots; r++) {
+            snapshot.commitCountsByRound[r] = commitCounts[gameNumber][uint8(r)];
+            snapshot.revealCountsByRound[r] = revealCounts[gameNumber][uint8(r)];
+        }
+
+        for (uint256 i = 0; i < playerLen; i++) {
+            address player = gamePlayers[i];
+            snapshot.players[i] = player;
+            snapshot.playerStates[i] = _buildPlayerStateDump(gameNumber, player, roundSlots);
+        }
+
+        return abi.encode(snapshot);
+    }
+
     function _syncPhaseByTime() internal {
         if (phase == Phase.Lobby && block.timestamp >= lobbyClosesAt) {
             if (playerCount < minPlayers) {
@@ -409,6 +466,7 @@ contract PizzaRat is AccessControl {
             phaseDeadline = 0;
             emit GameEnded(currentRound);
             currentGame += 1;
+            gameRecipeWad[currentGame] = currentRecipeWad;
             return;
         }
 
@@ -618,6 +676,33 @@ contract PizzaRat is AccessControl {
 
     function _absDiff(uint256 a, uint256 b) internal pure returns (uint256) {
         return a >= b ? a - b : b - a;
+    }
+
+    function _buildPlayerStateDump(
+        uint256 gameNumber,
+        address player,
+        uint256 roundSlots
+    ) internal view returns (PlayerStateDump memory dump) {
+        PlayerGameData storage data = playerData[gameNumber][player];
+        uint256 historyLen = data.rounds.length;
+
+        dump.player = player;
+        dump.alive = data.alive;
+        dump.score = data.score;
+        dump.latestCommitHash = data.latestCommitHash;
+        dump.roundHistory = new RoundEntry[](historyLen);
+        dump.commitmentsByRound = new bytes32[](roundSlots);
+        dump.revealedByRound = new bool[](roundSlots);
+
+        for (uint256 i = 0; i < historyLen; i++) {
+            dump.roundHistory[i] = data.rounds[i];
+        }
+
+        for (uint256 r = 1; r < roundSlots; r++) {
+            uint8 round = uint8(r);
+            dump.commitmentsByRound[r] = commitments[gameNumber][round][player];
+            dump.revealedByRound[r] = reveals[gameNumber][round][player];
+        }
     }
 
     function _removePlayer(address player) internal {
