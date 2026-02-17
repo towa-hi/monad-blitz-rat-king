@@ -16,7 +16,8 @@ contract PizzaRat is AccessControl {
     error MinPlayersMustBeGreaterThanZero();
     error MaxPlayersMustBeGreaterThanMinPlayers();
     error LobbyDurationMustBeGreaterThanZero();
-    error RoundDurationMustBeGreaterThanZero();
+    error CommitDurationMustBeGreaterThanZero();
+    error RevealDurationMustBeGreaterThanZero();
     error MaxRoundsMustBeGreaterThanZero();
     error JoinFeeMustBeGreaterThanZero();
     error LobbyIsClosed();
@@ -77,7 +78,8 @@ contract PizzaRat is AccessControl {
     uint8 public immutable maxPlayers;
     uint8 public immutable maxRounds;
     uint16 public immutable lobbyDurationSeconds;
-    uint16 public immutable roundDurationSeconds;
+    uint16 public immutable commitDurationSeconds;
+    uint16 public immutable revealDurationSeconds;
     uint256 public immutable feeWei;
     uint64 public immutable lobbyOpenedAt;
     uint64 public immutable lobbyClosesAt;
@@ -117,7 +119,8 @@ contract PizzaRat is AccessControl {
         uint8 _maxPlayers,
         uint8 _maxRounds,
         uint16 _lobbyDurationSeconds,
-        uint16 _roundDurationSeconds,
+        uint16 _commitDurationSeconds,
+        uint16 _revealDurationSeconds,
         uint256 _feeWei
     ) {
         if (_minPlayers == 0) {
@@ -129,8 +132,11 @@ contract PizzaRat is AccessControl {
         if (_lobbyDurationSeconds == 0) {
             revert LobbyDurationMustBeGreaterThanZero();
         }
-        if (_roundDurationSeconds == 0) {
-            revert RoundDurationMustBeGreaterThanZero();
+        if (_commitDurationSeconds == 0) {
+            revert CommitDurationMustBeGreaterThanZero();
+        }
+        if (_revealDurationSeconds == 0) {
+            revert RevealDurationMustBeGreaterThanZero();
         }
         if (_maxRounds == 0) {
             revert MaxRoundsMustBeGreaterThanZero();
@@ -146,7 +152,8 @@ contract PizzaRat is AccessControl {
         maxPlayers = _maxPlayers;
         maxRounds = _maxRounds;
         lobbyDurationSeconds = _lobbyDurationSeconds;
-        roundDurationSeconds = _roundDurationSeconds;
+        commitDurationSeconds = _commitDurationSeconds;
+        revealDurationSeconds = _revealDurationSeconds;
         feeWei = _feeWei;
         lobbyOpenedAt = uint64(block.timestamp);
         lobbyClosesAt = uint64(block.timestamp) + _lobbyDurationSeconds;
@@ -329,6 +336,13 @@ contract PizzaRat is AccessControl {
         _advanceRoundOrEndGame();
     }
 
+    function advancePhaseIfNeeded() external onlyRole(RELAYER_ROLE) returns (bool advanced) {
+        Phase phaseBefore = phase;
+        uint8 roundBefore = currentRound;
+        _syncPhaseByTime();
+        return phase != phaseBefore || currentRound != roundBefore;
+    }
+
     function getPlayers(uint256 gameNumber) external view returns (address[] memory) {
         return players[gameNumber];
     }
@@ -366,7 +380,7 @@ contract PizzaRat is AccessControl {
 
         phase = Phase.Commit;
         currentRound = 1;
-        phaseDeadline = uint64(block.timestamp) + roundDurationSeconds;
+        phaseDeadline = uint64(block.timestamp) + commitDurationSeconds;
 
         emit LobbyClosed(playerCount, currentRound, phaseDeadline);
         emit RoundPhaseAdvanced(currentRound, Phase.Commit, phaseDeadline);
@@ -378,7 +392,7 @@ contract PizzaRat is AccessControl {
         }
 
         phase = Phase.Reveal;
-        phaseDeadline = uint64(block.timestamp) + roundDurationSeconds;
+        phaseDeadline = uint64(block.timestamp) + revealDurationSeconds;
 
         emit RoundPhaseAdvanced(currentRound, Phase.Reveal, phaseDeadline);
     }
@@ -400,7 +414,7 @@ contract PizzaRat is AccessControl {
 
         currentRound += 1;
         phase = Phase.Commit;
-        phaseDeadline = uint64(block.timestamp) + roundDurationSeconds;
+        phaseDeadline = uint64(block.timestamp) + commitDurationSeconds;
 
         emit RoundPhaseAdvanced(currentRound, Phase.Commit, phaseDeadline);
     }

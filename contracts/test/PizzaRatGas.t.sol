@@ -18,7 +18,8 @@ contract PizzaRatGasTest is Test {
             _maxPlayers: uint8(NUM_PLAYERS),
             _maxRounds: 1,
             _lobbyDurationSeconds: 3600,
-            _roundDurationSeconds: 3600,
+            _commitDurationSeconds: 3600,
+            _revealDurationSeconds: 3600,
             _feeWei: FEE_WEI
         });
 

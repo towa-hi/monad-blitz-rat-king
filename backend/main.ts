@@ -3,9 +3,8 @@ import {
   isEmbeddedWalletLinkedAccount,
   PrivyClient,
   type User,
-  verifyAccessToken,
-  type VerifyAccessTokenResponse,
 } from "@privy-io/node";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import {
   type Account,
   type Chain,
@@ -29,7 +28,8 @@ interface AppConfig {
   port: number;
   sqlitePath: string;
   privyAppId: string;
-  privyVerificationKey: string;
+  privyJwksUrl: string;
+  privyJwks: ReturnType<typeof createRemoteJWKSet>;
   adminToken: string | null;
   chainId: number;
   caip2: string;
@@ -40,6 +40,13 @@ interface AppConfig {
   backendPublicClient: ReturnType<typeof createPublicClient>;
   backendWalletClient: ReturnType<typeof createWalletClient>;
   privyClient: PrivyClient;
+}
+
+/**
+ * Verified claims required by backend routes.
+ */
+interface VerifiedAccessTokenClaims {
+  user_id: string;
 }
 
 /**
@@ -227,7 +234,7 @@ export function isUint8(value: number): boolean {
 function loadConfig(): AppConfig {
   const privyAppId = requireEnv("PRIVY_APP_ID");
   const privyAppSecret = requireEnv("PRIVY_APP_SECRET");
-  const privyVerificationKey = requireEnv("PRIVY_VERIFICATION_KEY");
+  const privyJwksUrl = requireEnv("PRIVY_JWKS_URL");
   const adminToken = Deno.env.get("BACKEND_ADMIN_TOKEN") ?? null;
   const chainId = parsePositiveInteger(requireEnv("CHAIN_ID"), "CHAIN_ID");
   const rpcUrl = requireEnv("RPC_URL");
@@ -247,6 +254,7 @@ function loadConfig(): AppConfig {
     appId: privyAppId,
     appSecret: privyAppSecret,
   });
+  const privyJwks = createRemoteJWKSet(new URL(privyJwksUrl));
   const chain = defineChain({
     id: chainId,
     name: `configured-chain-${chainId}`,
@@ -281,7 +289,8 @@ function loadConfig(): AppConfig {
     port,
     sqlitePath,
     privyAppId,
-    privyVerificationKey,
+    privyJwksUrl,
+    privyJwks,
     adminToken,
     chainId,
     caip2: `eip155:${chainId}`,
@@ -412,7 +421,7 @@ function extractBearerToken(request: Request): string | null {
 }
 
 /**
- * Verifies a Privy access token using the configured verification key.
+ * Verifies a Privy access token using the configured JWKS endpoint.
  * @param accessToken - Access token from request.
  * @param config - App configuration.
  * @returns Verified access token claims.
@@ -421,12 +430,48 @@ function extractBearerToken(request: Request): string | null {
 async function verifyRequestAccessToken(
   accessToken: string,
   config: AppConfig,
-): Promise<VerifyAccessTokenResponse> {
-  return await verifyAccessToken({
-    access_token: accessToken,
-    app_id: config.privyAppId,
-    verification_key: config.privyVerificationKey,
-  });
+): Promise<VerifiedAccessTokenClaims> {
+  const verified = await jwtVerify(accessToken, config.privyJwks);
+  const payload = verified.payload as JWTPayload & {
+    user_id?: unknown;
+    app_id?: unknown;
+  };
+
+  if (!jwtAudienceIncludesAppId(payload.aud, config.privyAppId)) {
+    throw new Error("Access token audience does not match PRIVY_APP_ID.");
+  }
+  if (
+    payload.app_id !== undefined &&
+    (typeof payload.app_id !== "string" || payload.app_id !== config.privyAppId)
+  ) {
+    throw new Error("Access token app_id claim does not match PRIVY_APP_ID.");
+  }
+  if (typeof payload.user_id !== "string" || payload.user_id.length === 0) {
+    throw new Error("Access token is missing required user_id claim.");
+  }
+
+  return {
+    user_id: payload.user_id,
+  };
+}
+
+/**
+ * Checks whether JWT audience claim contains the expected app id.
+ * @param audience - JWT `aud` claim.
+ * @param appId - Expected Privy app id.
+ * @returns True when audience includes the expected app id.
+ */
+function jwtAudienceIncludesAppId(
+  audience: JWTPayload["aud"],
+  appId: string,
+): boolean {
+  if (typeof audience === "string") {
+    return audience === appId;
+  }
+  if (Array.isArray(audience)) {
+    return audience.some((value: unknown): boolean => value === appId);
+  }
+  return false;
 }
 
 /**
@@ -605,7 +650,7 @@ function findEmbeddedEthereumWalletId(
 async function authenticateRequest(
   request: Request,
   config: AppConfig,
-): Promise<{ accessToken: string; claims: VerifyAccessTokenResponse }> {
+): Promise<{ accessToken: string; claims: VerifiedAccessTokenClaims }> {
   const accessToken = extractBearerToken(request);
   if (accessToken === null) {
     throw new Error("Missing bearer access token.");
