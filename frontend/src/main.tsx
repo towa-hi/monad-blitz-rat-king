@@ -40,7 +40,15 @@ const hasPrivyAppId: boolean =
 createRoot(appRootElement).render(
   <StrictMode>
     {hasPrivyAppId && privyAppId !== undefined ? (
-      <PrivyProvider appId={privyAppId}>
+      <PrivyProvider
+        appId={privyAppId}
+        config={{
+          embeddedWallets: {
+            createOnLogin: "users-without-wallets",
+            showWalletUIs: false,
+          },
+        }}
+      >
         <App />
       </PrivyProvider>
     ) : (

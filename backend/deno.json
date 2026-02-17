@@ -1,9 +1,13 @@
 {
   "tasks": {
-    "dev": "deno run --watch main.ts"
+    "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write --allow-ffi main.ts",
+    "start": "deno run --allow-net --allow-env --allow-read --allow-write --allow-ffi main.ts",
+    "test": "deno test --allow-read --allow-write --allow-env --allow-ffi"
   },
   "imports": {
+    "@db/sqlite": "jsr:@db/sqlite@^0.12.0",
     "@std/assert": "jsr:@std/assert@1",
+    "@privy-io/node": "npm:@privy-io/node@^0.9.0",
     "viem": "npm:viem@^2.46.1",
     "viem/": "npm:viem@^2.46.1/"
   }

@@ -1,0 +1,159 @@
+{
+  "name": "pizza-rat-relayed-no-eth-calls",
+  "version": "1.0",
+  "chain_type": "ethereum",
+  "rules": [
+    {
+      "name": "allow-leave-with-zero-eth",
+      "method": "eth_sendTransaction",
+      "action": "ALLOW",
+      "conditions": [
+        {
+          "field_source": "ethereum_transaction",
+          "field": "to",
+          "operator": "eq",
+          "value": "{{PIZZA_RAT_CONTRACT_ADDRESS}}"
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "chain_id",
+          "operator": "eq",
+          "value": "{{CHAIN_ID_DECIMAL}}"
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "value",
+          "operator": "eq",
+          "value": "0x0"
+        },
+        {
+          "field_source": "ethereum_calldata",
+          "field": "function_name",
+          "operator": "eq",
+          "value": "leave",
+          "abi": [
+            {
+              "type": "function",
+              "name": "leave",
+              "stateMutability": "nonpayable",
+              "inputs": [],
+              "outputs": []
+            }
+          ]
+        },
+        {
+          "field_source": "system",
+          "field": "current_unix_timestamp",
+          "operator": "lte",
+          "value": "{{UNIX_EXPIRES_AT}}"
+        }
+      ]
+    },
+    {
+      "name": "allow-commit-with-zero-eth",
+      "method": "eth_sendTransaction",
+      "action": "ALLOW",
+      "conditions": [
+        {
+          "field_source": "ethereum_transaction",
+          "field": "to",
+          "operator": "eq",
+          "value": "{{PIZZA_RAT_CONTRACT_ADDRESS}}"
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "chain_id",
+          "operator": "eq",
+          "value": "{{CHAIN_ID_DECIMAL}}"
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "value",
+          "operator": "eq",
+          "value": "0x0"
+        },
+        {
+          "field_source": "ethereum_calldata",
+          "field": "function_name",
+          "operator": "eq",
+          "value": "commit",
+          "abi": [
+            {
+              "type": "function",
+              "name": "commit",
+              "stateMutability": "nonpayable",
+              "inputs": [
+                {
+                  "name": "commitment",
+                  "type": "bytes32"
+                }
+              ],
+              "outputs": []
+            }
+          ]
+        },
+        {
+          "field_source": "system",
+          "field": "current_unix_timestamp",
+          "operator": "lte",
+          "value": "{{UNIX_EXPIRES_AT}}"
+        }
+      ]
+    },
+    {
+      "name": "allow-reveal-with-zero-eth",
+      "method": "eth_sendTransaction",
+      "action": "ALLOW",
+      "conditions": [
+        {
+          "field_source": "ethereum_transaction",
+          "field": "to",
+          "operator": "eq",
+          "value": "{{PIZZA_RAT_CONTRACT_ADDRESS}}"
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "chain_id",
+          "operator": "eq",
+          "value": "{{CHAIN_ID_DECIMAL}}"
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "value",
+          "operator": "eq",
+          "value": "0x0"
+        },
+        {
+          "field_source": "ethereum_calldata",
+          "field": "function_name",
+          "operator": "eq",
+          "value": "reveal",
+          "abi": [
+            {
+              "type": "function",
+              "name": "reveal",
+              "stateMutability": "nonpayable",
+              "inputs": [
+                {
+                  "name": "move",
+                  "type": "uint8"
+                },
+                {
+                  "name": "salt",
+                  "type": "bytes32"
+                }
+              ],
+              "outputs": []
+            }
+          ]
+        },
+        {
+          "field_source": "system",
+          "field": "current_unix_timestamp",
+          "operator": "lte",
+          "value": "{{UNIX_EXPIRES_AT}}"
+        }
+      ]
+    }
+  ]
+}
