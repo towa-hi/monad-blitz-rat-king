@@ -2,8 +2,17 @@
 pragma solidity ^0.8.20;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {FixedPointMathLib} from "./libraries/FixedPointMathLib.sol";
 
 contract PizzaRat is AccessControl {
+    using FixedPointMathLib for uint256;
+
+    uint256 private constant WAD = 1e18;
+    int256 private constant NEG_FIVE_WAD = -5e18;
+    uint256 private constant ALPHA_WAD = 1e18; // Default from REFERENCE.py
+    uint256 private constant BETA_WAD = 3e17; // 0.3 default from REFERENCE.py
+    uint8 private constant NUM_INGREDIENTS = 6;
+
     error MinPlayersMustBeGreaterThanZero();
     error MaxPlayersMustBeGreaterThanMinPlayers();
     error LobbyDurationMustBeGreaterThanZero();
@@ -29,6 +38,8 @@ contract PizzaRat is AccessControl {
     error RoundStateMismatch(Phase expectedPhaseA, Phase expectedPhaseB, Phase actualPhase);
     error RoundNumberMismatch(uint8 expectedRound, uint8 providedRound);
     error RoundCloseTooSoon(uint64 phaseDeadline, uint64 currentTimestamp);
+    error RecipeEntryMustBeGreaterThanZero(uint256 index);
+    error RecipeSumMustEqualOneWad(uint256 providedSum);
 
     enum Phase {
         Lobby,
@@ -96,6 +107,11 @@ contract PizzaRat is AccessControl {
     event RoundPhaseAdvanced(uint8 indexed round, Phase phase, uint64 phaseDeadline);
     event GameEnded(uint8 indexed finalRound);
 
+    uint256[NUM_INGREDIENTS] public currentRecipeWad;
+
+    mapping(uint256 gameNumber => mapping(uint8 round => mapping(address player => Ingredient[5] ingredients)))
+        private revealedIngredients;
+
     constructor(
         uint8 _minPlayers,
         uint8 _maxPlayers,
@@ -135,8 +151,23 @@ contract PizzaRat is AccessControl {
         lobbyOpenedAt = uint64(block.timestamp);
         lobbyClosesAt = uint64(block.timestamp) + _lobbyDurationSeconds;
         phase = Phase.Lobby;
+        currentRecipeWad = _defaultRecipeWad();
 
         emit LobbyOpened(lobbyOpenedAt, lobbyClosesAt);
+    }
+
+    function setCurrentRecipeWad(uint256[NUM_INGREDIENTS] calldata recipeWad) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        uint256 sum;
+        for (uint256 i = 0; i < NUM_INGREDIENTS; i++) {
+            if (recipeWad[i] == 0) {
+                revert RecipeEntryMustBeGreaterThanZero(i);
+            }
+            sum += recipeWad[i];
+        }
+        if (sum != WAD) {
+            revert RecipeSumMustEqualOneWad(sum);
+        }
+        currentRecipeWad = recipeWad;
     }
 
     function join() external payable {
@@ -254,6 +285,7 @@ contract PizzaRat is AccessControl {
 
         reveals[currentGame][currentRound][msg.sender] = true;
         revealCounts[currentGame][currentRound] += 1;
+        revealedIngredients[currentGame][currentRound][msg.sender] = ingredients;
 
         uint256 currentScore = playerData[currentGame][msg.sender].score;
         playerData[currentGame][msg.sender].rounds.push(
@@ -373,10 +405,205 @@ contract PizzaRat is AccessControl {
         emit RoundPhaseAdvanced(currentRound, Phase.Commit, phaseDeadline);
     }
 
-    function _scoreRound() internal view {
-        currentGame;
-        currentRound;
-        // TODO: implement scoring for all revealed players in the provided game/round.
+    function _scoreRound() internal {
+        address[] storage gamePlayers = players[currentGame];
+        uint256 activeCount;
+        for (uint256 i = 0; i < gamePlayers.length; i++) {
+            if (playerData[currentGame][gamePlayers[i]].alive) {
+                activeCount += 1;
+            }
+        }
+        if (activeCount == 0) {
+            return;
+        }
+
+        address[] memory activePlayers = new address[](activeCount);
+        uint256 k;
+        for (uint256 i = 0; i < gamePlayers.length; i++) {
+            address player = gamePlayers[i];
+            if (playerData[currentGame][player].alive) {
+                activePlayers[k] = player;
+                unchecked {
+                    k++;
+                }
+            }
+        }
+
+        uint256[] memory contributions = new uint256[](activeCount * NUM_INGREDIENTS);
+        uint256[NUM_INGREDIENTS] memory pool;
+        for (uint256 i = 0; i < activeCount; i++) {
+            address player = activePlayers[i];
+            if (!reveals[currentGame][currentRound][player]) {
+                continue;
+            }
+
+            Ingredient[5] memory ingredients = revealedIngredients[currentGame][currentRound][player];
+            uint256[NUM_INGREDIENTS] memory vec = _ingredientsToVector(ingredients);
+            for (uint256 j = 0; j < NUM_INGREDIENTS; j++) {
+                uint256 amount = vec[j];
+                contributions[(i * NUM_INGREDIENTS) + j] = amount;
+                pool[j] += amount;
+            }
+        }
+
+        uint256 qualityAll = _computeQualityWad(pool, currentRecipeWad);
+        uint256[] memory uniqueness = _computeUniquenessWad(contributions, pool, activeCount);
+        uint256[] memory contribution = _computeContributionWad(
+            contributions,
+            pool,
+            currentRecipeWad,
+            qualityAll,
+            activeCount
+        );
+
+        for (uint256 i = 0; i < activeCount; i++) {
+            uint256 u = uniqueness[i];
+            uint256 c = contribution[i];
+            int256 scoreSigned = FixedPointMathLib.sMulWad(
+                FixedPointMathLib.powWad(int256(u), int256(ALPHA_WAD)),
+                int256(BETA_WAD + c)
+            );
+            uint256 roundScore = scoreSigned > 0 ? uint256(scoreSigned) : 0;
+            playerData[currentGame][activePlayers[i]].score += roundScore;
+        }
+    }
+
+    function _computeQualityWad(
+        uint256[NUM_INGREDIENTS] memory pool,
+        uint256[NUM_INGREDIENTS] memory recipeWad
+    ) internal pure returns (uint256) {
+        uint256 poolTotal;
+        for (uint256 j = 0; j < NUM_INGREDIENTS; j++) {
+            poolTotal += pool[j];
+        }
+        if (poolTotal == 0) {
+            return 0;
+        }
+
+        uint256 distanceSquaredWad;
+        for (uint256 j = 0; j < NUM_INGREDIENTS; j++) {
+            uint256 proportionWad = (pool[j] * WAD) / poolTotal;
+            uint256 diff = _absDiff(proportionWad, recipeWad[j]);
+            distanceSquaredWad += diff.mulWad(diff);
+        }
+        uint256 distanceWad = FixedPointMathLib.sqrtWad(distanceSquaredWad);
+        int256 exponent = FixedPointMathLib.sMulWad(NEG_FIVE_WAD, int256(distanceWad));
+        int256 quality = FixedPointMathLib.expWad(exponent);
+        return quality <= 0 ? 0 : uint256(quality);
+    }
+
+    function _computeUniquenessWad(
+        uint256[] memory contributions,
+        uint256[NUM_INGREDIENTS] memory pool,
+        uint256 n
+    ) internal pure returns (uint256[] memory uniqueness) {
+        uniqueness = new uint256[](n);
+        if (n <= 1) {
+            if (n == 1) {
+                uniqueness[0] = 5e17;
+            }
+            return uniqueness;
+        }
+
+        uint256[NUM_INGREDIENTS] memory avgWad;
+        for (uint256 j = 0; j < NUM_INGREDIENTS; j++) {
+            avgWad[j] = (pool[j] * WAD) / n;
+        }
+
+        uint256[] memory raw = new uint256[](n);
+        uint256 maxRaw;
+        for (uint256 i = 0; i < n; i++) {
+            uint256 d2Wad;
+            for (uint256 j = 0; j < NUM_INGREDIENTS; j++) {
+                uint256 xWad = contributions[(i * NUM_INGREDIENTS) + j] * WAD;
+                uint256 diff = _absDiff(xWad, avgWad[j]);
+                d2Wad += diff.mulWad(diff);
+            }
+            uint256 d = FixedPointMathLib.sqrtWad(d2Wad);
+            raw[i] = d;
+            if (d > maxRaw) {
+                maxRaw = d;
+            }
+        }
+
+        if (maxRaw == 0) {
+            return uniqueness;
+        }
+
+        for (uint256 i = 0; i < n; i++) {
+            uniqueness[i] = raw[i].divWad(maxRaw);
+        }
+    }
+
+    function _computeContributionWad(
+        uint256[] memory contributions,
+        uint256[NUM_INGREDIENTS] memory pool,
+        uint256[NUM_INGREDIENTS] memory recipeWad,
+        uint256 qualityAll,
+        uint256 n
+    ) internal pure returns (uint256[] memory normalized) {
+        normalized = new uint256[](n);
+        if (n == 0) {
+            return normalized;
+        }
+
+        int256[] memory raw = new int256[](n);
+        int256 minRaw = type(int256).max;
+        int256 maxRaw = type(int256).min;
+
+        for (uint256 i = 0; i < n; i++) {
+            uint256[NUM_INGREDIENTS] memory poolWithout;
+            for (uint256 j = 0; j < NUM_INGREDIENTS; j++) {
+                poolWithout[j] = pool[j] - contributions[(i * NUM_INGREDIENTS) + j];
+            }
+
+            uint256 qualityWithout = _computeQualityWad(poolWithout, recipeWad);
+            int256 delta = int256(qualityAll) - int256(qualityWithout);
+            raw[i] = delta;
+            if (delta < minRaw) {
+                minRaw = delta;
+            }
+            if (delta > maxRaw) {
+                maxRaw = delta;
+            }
+        }
+
+        if (maxRaw == minRaw) {
+            for (uint256 i = 0; i < n; i++) {
+                normalized[i] = 5e17;
+            }
+            return normalized;
+        }
+
+        uint256 range = uint256(maxRaw - minRaw);
+        for (uint256 i = 0; i < n; i++) {
+            uint256 shifted = uint256(raw[i] - minRaw);
+            normalized[i] = (shifted * WAD) / range;
+        }
+    }
+
+    function _ingredientsToVector(Ingredient[5] memory ingredients) internal pure returns (uint256[NUM_INGREDIENTS] memory vec) {
+        for (uint256 i = 0; i < 5; i++) {
+            uint8 ingredientIndex = uint8(ingredients[i]);
+            if (ingredientIndex == 0) {
+                continue;
+            }
+            unchecked {
+                vec[ingredientIndex - 1] += 1;
+            }
+        }
+    }
+
+    function _defaultRecipeWad() internal pure returns (uint256[NUM_INGREDIENTS] memory recipe) {
+        uint256 base = WAD / NUM_INGREDIENTS;
+        for (uint256 i = 0; i < NUM_INGREDIENTS; i++) {
+            recipe[i] = base;
+        }
+        recipe[0] += WAD - (base * NUM_INGREDIENTS);
+    }
+
+    function _absDiff(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a >= b ? a - b : b - a;
     }
 
     function _removePlayer(address player) internal {
