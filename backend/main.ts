@@ -7,12 +7,19 @@ import {
   type VerifyAccessTokenResponse,
 } from "@privy-io/node";
 import {
+  type Account,
+  type Chain,
   type Address,
+  createPublicClient,
+  createWalletClient,
+  defineChain,
   encodeFunctionData,
   getAddress,
+  http,
   type Hex,
   isAddress,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 /**
  * Runtime configuration for the backend service.
@@ -23,9 +30,15 @@ interface AppConfig {
   sqlitePath: string;
   privyAppId: string;
   privyVerificationKey: string;
+  adminToken: string | null;
   chainId: number;
   caip2: string;
+  chain: Chain;
+  rpcUrl: string;
   contractAddress: Address;
+  backendAccount: Account;
+  backendPublicClient: ReturnType<typeof createPublicClient>;
+  backendWalletClient: ReturnType<typeof createWalletClient>;
   privyClient: PrivyClient;
 }
 
@@ -60,6 +73,13 @@ interface CommitRequestBody {
 interface RevealRequestBody {
   move: number;
   salt: string;
+}
+
+/**
+ * Input payload expected by the admin close round endpoint.
+ */
+interface CloseRoundRequestBody {
+  round: number;
 }
 
 /**
@@ -111,7 +131,16 @@ const PIZZA_RAT_ABI = [
     ],
     outputs: [],
   },
+  {
+    type: "function",
+    name: "closeRound",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "round", type: "uint8" }],
+    outputs: [],
+  },
 ] as const;
+
+const PRIVATE_KEY_HEX_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 /**
  * Reads a required environment variable.
@@ -142,6 +171,20 @@ function parsePositiveInteger(rawValue: string, variableName: string): number {
   }
 
   return parsed;
+}
+
+/**
+ * Validates a 32-byte hex private key string.
+ * @param rawValue - Candidate private key string.
+ * @returns The validated private key string.
+ * @throws If value is not a valid 32-byte hex private key.
+ */
+function parsePrivateKey(rawValue: string): Hex {
+  if (!PRIVATE_KEY_HEX_PATTERN.test(rawValue)) {
+    throw new Error("BACKEND_PRIVATE_KEY must be a 32-byte 0x-prefixed hex.");
+  }
+
+  return rawValue as Hex;
 }
 
 /**
@@ -185,7 +228,10 @@ function loadConfig(): AppConfig {
   const privyAppId = requireEnv("PRIVY_APP_ID");
   const privyAppSecret = requireEnv("PRIVY_APP_SECRET");
   const privyVerificationKey = requireEnv("PRIVY_VERIFICATION_KEY");
+  const adminToken = Deno.env.get("BACKEND_ADMIN_TOKEN") ?? null;
   const chainId = parsePositiveInteger(requireEnv("CHAIN_ID"), "CHAIN_ID");
+  const rpcUrl = requireEnv("RPC_URL");
+  const backendPrivateKey = parsePrivateKey(requireEnv("BACKEND_PRIVATE_KEY"));
   const contractAddress = normalizeWalletAddress(
     requireEnv("PIZZA_RAT_CONTRACT_ADDRESS"),
   );
@@ -201,6 +247,34 @@ function loadConfig(): AppConfig {
     appId: privyAppId,
     appSecret: privyAppSecret,
   });
+  const chain = defineChain({
+    id: chainId,
+    name: `configured-chain-${chainId}`,
+    network: `configured-chain-${chainId}`,
+    nativeCurrency: {
+      name: "Native",
+      symbol: "ETH",
+      decimals: 18,
+    },
+    rpcUrls: {
+      default: {
+        http: [rpcUrl],
+      },
+      public: {
+        http: [rpcUrl],
+      },
+    },
+  });
+  const backendAccount = privateKeyToAccount(backendPrivateKey);
+  const backendPublicClient = createPublicClient({
+    chain,
+    transport: http(rpcUrl),
+  });
+  const backendWalletClient = createWalletClient({
+    account: backendAccount,
+    chain,
+    transport: http(rpcUrl),
+  });
 
   return {
     host,
@@ -208,9 +282,15 @@ function loadConfig(): AppConfig {
     sqlitePath,
     privyAppId,
     privyVerificationKey,
+    adminToken,
     chainId,
     caip2: `eip155:${chainId}`,
+    chain,
+    rpcUrl,
     contractAddress,
+    backendAccount,
+    backendPublicClient,
+    backendWalletClient,
     privyClient,
   };
 }
@@ -421,6 +501,20 @@ function isRevealRequestBody(value: unknown): value is RevealRequestBody {
 }
 
 /**
+ * Type guard for admin close round endpoint body.
+ * @param value - Unknown parsed payload.
+ * @returns True when payload shape is valid.
+ */
+function isCloseRoundRequestBody(value: unknown): value is CloseRoundRequestBody {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "round" in value &&
+    typeof value.round === "number"
+  );
+}
+
+/**
  * Creates a JSON response with CORS headers.
  * @param status - HTTP status code.
  * @param payload - Serializable response payload.
@@ -541,6 +635,24 @@ function requireRegisteredWallet(
 }
 
 /**
+ * Checks admin authorization token when configured.
+ * @param request - Incoming request.
+ * @param config - App configuration.
+ * @returns Nothing.
+ * @throws If admin token is configured but request token is missing or invalid.
+ */
+function authorizeAdminRequest(request: Request, config: AppConfig): void {
+  if (config.adminToken === null || config.adminToken.length === 0) {
+    return;
+  }
+
+  const providedToken = request.headers.get("x-backend-token");
+  if (providedToken === null || providedToken !== config.adminToken) {
+    throw new Error("Unauthorized admin request.");
+  }
+}
+
+/**
  * Relays an Ethereum transaction through Privy for a specific wallet.
  * @param config - App configuration.
  * @param walletId - Privy wallet ID.
@@ -574,6 +686,28 @@ async function relayTransaction(
   );
 
   return result.hash as Hex;
+}
+
+/**
+ * Simulates and submits a backend-owned `closeRound(uint8)` transaction.
+ * @param config - App configuration.
+ * @param round - Round index to close.
+ * @returns Transaction hash.
+ * @throws If simulation or transaction submission fails.
+ */
+async function simulateAndCloseRound(
+  config: AppConfig,
+  round: number,
+): Promise<Hex> {
+  const simulation = await config.backendPublicClient.simulateContract({
+    address: config.contractAddress,
+    abi: PIZZA_RAT_ABI,
+    functionName: "closeRound",
+    args: [round],
+    account: config.backendAccount,
+  });
+
+  return await config.backendWalletClient.writeContract(simulation.request);
 }
 
 /**
@@ -795,6 +929,50 @@ async function handleReveal(
 }
 
 /**
+ * Handles backend-triggered close-round operation.
+ * @param request - Incoming request.
+ * @param config - App configuration.
+ * @returns HTTP response.
+ */
+async function handleAdminCloseRound(
+  request: Request,
+  config: AppConfig,
+): Promise<Response> {
+  authorizeAdminRequest(request, config);
+  const payload = await parseJsonBody(request);
+  if (!isCloseRoundRequestBody(payload)) {
+    return errorResponse(
+      400,
+      "Invalid request body.",
+      "Expected { round: uint8 number }.",
+    );
+  }
+  if (!isUint8(payload.round) || payload.round === 0) {
+    return errorResponse(
+      400,
+      "Invalid round.",
+      "Round must be an integer in [1, 255].",
+    );
+  }
+
+  const txHash = await simulateAndCloseRound(config, payload.round);
+  const responseBody: ApiSuccessBody<{
+    action: "closeRound";
+    round: number;
+    txHash: Hex;
+  }> = {
+    ok: true,
+    data: {
+      action: "closeRound",
+      round: payload.round,
+      txHash,
+    },
+  };
+
+  return jsonResponse(200, responseBody);
+}
+
+/**
  * Handles all HTTP requests for the backend API.
  * @param request - Incoming request.
  * @param config - App configuration.
@@ -831,6 +1009,10 @@ async function routeRequest(
 
     if (request.method === "POST" && pathname === "/api/actions/reveal") {
       return await handleReveal(request, config, db);
+    }
+
+    if (request.method === "POST" && pathname === "/api/admin/close-round") {
+      return await handleAdminCloseRound(request, config);
     }
 
     if (pathname.startsWith("/api/")) {
