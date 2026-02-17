@@ -24,6 +24,8 @@ contract PizzaRat is AccessControl {
     error CommitmentMissing(address player, uint8 round);
     error RevealAlreadySubmitted(address player, uint8 round);
     error RevealDoesNotMatchCommitment(address player, uint8 round);
+    error IngredientCannotBeNothing(uint256 index);
+    error IngredientsMustBeSortedAscending(uint256 index, Ingredient previousIngredient, Ingredient currentIngredient);
     error RoundStateMismatch(Phase expectedPhaseA, Phase expectedPhaseB, Phase actualPhase);
     error RoundNumberMismatch(uint8 expectedRound, uint8 providedRound);
     error RoundCloseTooSoon(uint64 phaseDeadline, uint64 currentTimestamp);
@@ -34,6 +36,28 @@ contract PizzaRat is AccessControl {
         Reveal,
         Ended,
         Cancelled
+    }
+
+    enum Ingredient {
+        NOTHING,
+        DOUGH,
+        SAUCE,
+        CHEESE,
+        PEPPERONI,
+        BASIL,
+        ANCHOVY
+    }
+
+    struct RoundEntry {
+        uint256 score; // starts at zero, compounds
+        Ingredient[5] ingredients;
+    }
+
+    struct PlayerGameData {
+        bool alive;
+        uint256 score;
+        bytes32 latestCommitHash;
+        RoundEntry[] rounds;
     }
 
     bytes32 public constant RELAYER_ROLE = keccak256("RELAYER_ROLE");
@@ -48,17 +72,19 @@ contract PizzaRat is AccessControl {
     uint64 public immutable lobbyClosesAt;
 
     Phase public phase;
+    uint256 public currentGame;
     uint8 public currentRound;
     uint16 public playerCount;
     uint64 public phaseDeadline;
 
-    address[] private players;
-    mapping(address player => bool joined) public isPlayer;
-    mapping(address player => uint256 oneBasedIndex) private playerIndex;
-    mapping(uint8 round => mapping(address player => bytes32 commitment)) private commitments;
-    mapping(uint8 round => mapping(address player => bool revealed)) private reveals;
-    mapping(uint8 round => uint16 count) public commitCounts;
-    mapping(uint8 round => uint16 count) public revealCounts;
+    mapping(uint256 gameNumber => address[] players) private players;
+    mapping(uint256 gameNumber => mapping(address player => bool joined)) public isPlayer;
+    mapping(uint256 gameNumber => mapping(address player => uint256 oneBasedIndex)) private playerIndex;
+    mapping(uint256 gameNumber => mapping(uint8 round => mapping(address player => bytes32 commitment))) private commitments;
+    mapping(uint256 gameNumber => mapping(uint8 round => mapping(address player => bool revealed))) private reveals;
+    mapping(uint256 gameNumber => mapping(uint8 round => uint16 count)) public commitCounts;
+    mapping(uint256 gameNumber => mapping(uint8 round => uint16 count)) public revealCounts;
+    mapping(uint256 gameNumber => mapping(address player => PlayerGameData gameData)) private playerData;
 
     event LobbyOpened(uint64 openedAt, uint64 closesAt);
     event LobbyClosed(uint16 playerCount, uint8 startingRound, uint64 commitDeadline);
@@ -66,7 +92,7 @@ contract PizzaRat is AccessControl {
     event PlayerJoined(address indexed player, uint256 feeWei, uint16 playerCount);
     event PlayerLeft(address indexed player, uint16 playerCount);
     event CommitSubmitted(address indexed player, uint8 indexed round, bytes32 commitment);
-    event RevealSubmitted(address indexed player, uint8 indexed round, uint8 move, bytes32 salt);
+    event RevealSubmitted(address indexed player, uint8 indexed round, bytes32 salt, Ingredient[5] ingredients);
     event RoundPhaseAdvanced(uint8 indexed round, Phase phase, uint64 phaseDeadline);
     event GameEnded(uint8 indexed finalRound);
 
@@ -124,16 +150,17 @@ contract PizzaRat is AccessControl {
         if (msg.value != feeWei) {
             revert JoinFeeMismatch(feeWei, msg.value);
         }
-        if (isPlayer[msg.sender]) {
+        if (isPlayer[currentGame][msg.sender]) {
             revert PlayerAlreadyJoined(msg.sender);
         }
         if (playerCount >= maxPlayers) {
             revert LobbyIsFull(maxPlayers);
         }
 
-        isPlayer[msg.sender] = true;
-        players.push(msg.sender);
-        playerIndex[msg.sender] = players.length;
+        isPlayer[currentGame][msg.sender] = true;
+        players[currentGame].push(msg.sender);
+        playerIndex[currentGame][msg.sender] = players[currentGame].length;
+        playerData[currentGame][msg.sender].alive = true;
         playerCount += 1;
 
         emit PlayerJoined(msg.sender, msg.value, playerCount);
@@ -145,7 +172,7 @@ contract PizzaRat is AccessControl {
 
     function leave() external {
         _syncPhaseByTime();
-        if (!isPlayer[msg.sender]) {
+        if (!playerData[currentGame][msg.sender].alive) {
             revert PlayerNotJoined(msg.sender);
         }
         if (phase != Phase.Lobby && phase != Phase.Cancelled) {
@@ -170,27 +197,28 @@ contract PizzaRat is AccessControl {
         if (phase != Phase.Commit) {
             revert CommitPhaseIsClosed();
         }
-        if (!isPlayer[msg.sender]) {
+        if (!playerData[currentGame][msg.sender].alive) {
             revert PlayerNotJoined(msg.sender);
         }
         if (commitment == bytes32(0)) {
             revert EmptyCommitment();
         }
-        if (commitments[currentRound][msg.sender] != bytes32(0)) {
+        if (commitments[currentGame][currentRound][msg.sender] != bytes32(0)) {
             revert CommitmentAlreadySubmitted(msg.sender, currentRound);
         }
 
-        commitments[currentRound][msg.sender] = commitment;
-        commitCounts[currentRound] += 1;
+        commitments[currentGame][currentRound][msg.sender] = commitment;
+        playerData[currentGame][msg.sender].latestCommitHash = commitment;
+        commitCounts[currentGame][currentRound] += 1;
 
         emit CommitSubmitted(msg.sender, currentRound, commitment);
 
-        if (commitCounts[currentRound] == playerCount) {
+        if (commitCounts[currentGame][currentRound] == playerCount) {
             _openRevealPhase();
         }
     }
 
-    function reveal(uint8 move, bytes32 salt) external {
+    function reveal(bytes32 salt, Ingredient[5] calldata ingredients) external {
         _syncPhaseByTime();
         if (phase == Phase.Cancelled) {
             revert LobbyHasBeenCancelled();
@@ -198,31 +226,55 @@ contract PizzaRat is AccessControl {
         if (phase != Phase.Reveal) {
             revert RevealPhaseIsClosed();
         }
-        if (!isPlayer[msg.sender]) {
+        if (!playerData[currentGame][msg.sender].alive) {
             revert PlayerNotJoined(msg.sender);
         }
 
-        bytes32 commitment = commitments[currentRound][msg.sender];
+        bytes32 commitment = commitments[currentGame][currentRound][msg.sender];
         if (commitment == bytes32(0)) {
             revert CommitmentMissing(msg.sender, currentRound);
         }
-        if (reveals[currentRound][msg.sender]) {
+        if (reveals[currentGame][currentRound][msg.sender]) {
             revert RevealAlreadySubmitted(msg.sender, currentRound);
         }
 
-        bytes32 revealHash = keccak256(abi.encodePacked(msg.sender, currentRound, move, salt));
+        for (uint256 i = 0; i < 5; i++) {
+            if (ingredients[i] == Ingredient.NOTHING) {
+                revert IngredientCannotBeNothing(i);
+            }
+            if (i > 0 && uint8(ingredients[i]) < uint8(ingredients[i - 1])) {
+                revert IngredientsMustBeSortedAscending(i, ingredients[i - 1], ingredients[i]);
+            }
+        }
+
+        bytes32 revealHash = computeCommitHash(msg.sender, currentGame, currentRound, salt, ingredients);
         if (revealHash != commitment) {
             revert RevealDoesNotMatchCommitment(msg.sender, currentRound);
         }
 
-        reveals[currentRound][msg.sender] = true;
-        revealCounts[currentRound] += 1;
+        reveals[currentGame][currentRound][msg.sender] = true;
+        revealCounts[currentGame][currentRound] += 1;
 
-        emit RevealSubmitted(msg.sender, currentRound, move, salt);
+        uint256 currentScore = playerData[currentGame][msg.sender].score;
+        playerData[currentGame][msg.sender].rounds.push(
+            RoundEntry({score: currentScore, ingredients: ingredients})
+        );
 
-        if (revealCounts[currentRound] == commitCounts[currentRound]) {
+        emit RevealSubmitted(msg.sender, currentRound, salt, ingredients);
+
+        if (revealCounts[currentGame][currentRound] == commitCounts[currentGame][currentRound]) {
             _advanceRoundOrEndGame();
         }
+    }
+
+    function computeCommitHash(
+        address player,
+        uint256 gameNumber,
+        uint8 round,
+        bytes32 salt,
+        Ingredient[5] memory ingredients
+    ) public pure returns (bytes32) {
+        return keccak256(abi.encode(player, gameNumber, round, salt, ingredients));
     }
 
     function closeRound(uint8 round) external onlyRole(RELAYER_ROLE) {
@@ -245,12 +297,12 @@ contract PizzaRat is AccessControl {
         _advanceRoundOrEndGame();
     }
 
-    function getPlayers() external view returns (address[] memory) {
-        return players;
+    function getPlayers(uint256 gameNumber) external view returns (address[] memory) {
+        return players[gameNumber];
     }
 
-    function getCommitment(uint8 round, address player) external view returns (bytes32) {
-        return commitments[round][player];
+    function getCommitment(uint256 gameNumber, uint8 round, address player) external view returns (bytes32) {
+        return commitments[gameNumber][round][player];
     }
 
     function _syncPhaseByTime() internal {
@@ -304,10 +356,13 @@ contract PizzaRat is AccessControl {
             return;
         }
 
+        _scoreRound();
+
         if (currentRound >= maxRounds) {
             phase = Phase.Ended;
             phaseDeadline = 0;
             emit GameEnded(currentRound);
+            currentGame += 1;
             return;
         }
 
@@ -318,19 +373,13 @@ contract PizzaRat is AccessControl {
         emit RoundPhaseAdvanced(currentRound, Phase.Commit, phaseDeadline);
     }
 
+    function _scoreRound() internal view {
+        currentGame;
+        currentRound;
+        // TODO: implement scoring for all revealed players in the provided game/round.
+    }
+
     function _removePlayer(address player) internal {
-        uint256 oneBasedIndex = playerIndex[player];
-        uint256 removeIndex = oneBasedIndex - 1;
-        uint256 lastIndex = players.length - 1;
-
-        if (removeIndex != lastIndex) {
-            address movedPlayer = players[lastIndex];
-            players[removeIndex] = movedPlayer;
-            playerIndex[movedPlayer] = oneBasedIndex;
-        }
-
-        players.pop();
-        delete playerIndex[player];
-        delete isPlayer[player];
+        playerData[currentGame][player].alive = false;
     }
 }
