@@ -1,0 +1,19 @@
+[
+  {
+    "type": "function",
+    "name": "getGameStateDump",
+    "stateMutability": "view",
+    "inputs": [
+      {
+        "name": "gameNumber",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "dump",
+        "type": "bytes"
+      }
+    ]
+  }
+]
