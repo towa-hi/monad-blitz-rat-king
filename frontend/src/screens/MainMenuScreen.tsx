@@ -1,5 +1,6 @@
 import type { JSX } from "react";
 import { useNavigation } from "../context/NavigationContext";
+import { useGameState } from "../hooks/useGameState.ts";
 import { PLAYER_ENTRIES } from "../constants/players";
 import type { PlayerEntry } from "../constants/players";
 
@@ -47,8 +48,18 @@ function PlayerCard(props: { readonly player: PlayerEntry }): JSX.Element {
  * as a 4x5 grid of player entries.
  * @returns The main menu screen UI.
  */
+/** Phase labels indexed by the numeric phase value from the contract. */
+const PHASE_LABELS: Record<number, string> = {
+  0: "Waiting for players",
+  1: "Commit phase",
+  2: "Reveal phase",
+  3: "Resolution",
+  4: "Game over",
+};
+
 export function MainMenuScreen(): JSX.Element {
   const { navigateTo } = useNavigation();
+  const { gameState, loading, error } = useGameState(1, { pollIntervalMs: 1_000 });
 
   /**
    * Navigates the user into the game screen.
@@ -57,6 +68,11 @@ export function MainMenuScreen(): JSX.Element {
     navigateTo("game");
   };
 
+  const playerCount = gameState?.playerCount ?? PLAYER_ENTRIES.length;
+  const currentRound = gameState?.currentRound ?? 0;
+  const phase = gameState?.phase ?? 0;
+  const phaseLabel = PHASE_LABELS[phase] ?? "Unknown";
+
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-4 py-4">
       {/* Header */}
@@ -64,18 +80,25 @@ export function MainMenuScreen(): JSX.Element {
         <h1 className="text-2xl font-black text-[#3f2a14]">Main Menu</h1>
       </div>
 
+      {/* Connection status */}
+      {error !== null && (
+        <p className="text-xs font-semibold text-red-600">
+          Failed to fetch game state: {error}
+        </p>
+      )}
+
       {/* Game state lobby panel */}
       <div className="animate-fade-in w-full max-w-screen-2xl">
         <div className="overflow-hidden rounded-2xl border-2 border-[#d9ae78] bg-[#fff8ec]/90 shadow-[0_8px_32px_rgba(72,43,16,0.12)]">
           {/* Panel header */}
           <div className="flex items-center justify-between border-b border-[#d9ae78] px-4 py-2">
             <p className="text-xs font-semibold uppercase tracking-widest text-[#9a5d20]">
-              Lobby — {PLAYER_ENTRIES.length} Players — Round: 0/5
+              Lobby — {playerCount} Players — Round: {currentRound}/5
             </p>
             <div className="flex items-center gap-2">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-[#2f7a3f]" />
-              <p className="text-xs font-semibold text-[#2f7a3f]">
-                Waiting for players
+              <span className={`h-2 w-2 rounded-full ${loading ? "animate-pulse bg-[#9a5d20]" : "animate-pulse bg-[#2f7a3f]"}`} />
+              <p className={`text-xs font-semibold ${loading ? "text-[#9a5d20]" : "text-[#2f7a3f]"}`}>
+                {loading ? "Connecting…" : phaseLabel}
               </p>
             </div>
           </div>
