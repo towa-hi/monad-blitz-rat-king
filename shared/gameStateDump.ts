@@ -39,14 +39,14 @@ export interface GameStateJson {
 }
 
 /**
- * Minimal client interface for reading game-state dump from chain.
+ * Minimal client interface for reading contract data from chain.
  */
 interface GameStateReaderClient {
   readContract(parameters: {
     address: Address;
     abi: Abi;
-    functionName: "getGameStateDump";
-    args: readonly [bigint];
+    functionName: string;
+    args?: readonly unknown[];
   }): Promise<unknown>;
 }
 
@@ -194,6 +194,28 @@ function decodeGameStateDump(encodedDump: Hex): GameStateJson {
     revealCountsByRound,
     playerStates,
   };
+}
+
+/**
+ * Queries the contract's `currentGame` storage variable and returns it as an integer.
+ * This should be called before fetching game state to ensure a game exists (value >= 1).
+ *
+ * @param publicClient - Viem public client.
+ * @param contractAddress - PizzaRat contract address.
+ * @returns The current game number as an integer.
+ * @throws If the contract call fails or returns a non-numeric value.
+ */
+export async function fetchCurrentGame(
+  publicClient: GameStateReaderClient,
+  contractAddress: Address,
+): Promise<number> {
+  const result = await publicClient.readContract({
+    address: contractAddress,
+    abi: GAME_STATE_ABI,
+    functionName: "currentGame",
+  });
+
+  return toNumber(result, "currentGame");
 }
 
 /**

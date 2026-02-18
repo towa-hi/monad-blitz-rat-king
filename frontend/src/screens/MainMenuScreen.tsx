@@ -1,17 +1,47 @@
+import { useMemo } from "react";
 import type { JSX } from "react";
 import { useNavigation } from "../context/NavigationContext";
+import { useWallet } from "../context/WalletContext";
 import { useGameState } from "../hooks/useGameState.ts";
-import { PLAYER_ENTRIES } from "../constants/players";
+import { buildPlayerEntries } from "../constants/players";
 import type { PlayerEntry } from "../constants/players";
+
+/**
+ * Props for a single player card in the lobby grid.
+ */
+interface PlayerCardProps {
+  /** The player entry data. */
+  readonly player: PlayerEntry;
+  /** Whether this slot is empty (no player has joined). */
+  readonly empty: boolean;
+}
 
 /**
  * A single player card displayed within the lobby grid.
  * Shows portrait, name, score, and a "you" indicator for the local player.
- * @param props - The player entry data.
+ * Renders in a grayed-out state when the slot is unoccupied.
+ *
+ * @param props - The player entry data and occupancy flag.
  * @returns A styled player card element.
  */
-function PlayerCard(props: { readonly player: PlayerEntry }): JSX.Element {
-  const { player } = props;
+function PlayerCard(props: PlayerCardProps): JSX.Element {
+  const { player, empty } = props;
+
+  if (empty) {
+    return (
+      <div className="flex flex-1 items-center gap-1.5 rounded-lg border border-[#e0d6c8] bg-[#f0ece4]/60 px-1.5 opacity-50">
+        <div className="h-6 w-6 shrink-0 rounded-md border border-[#d4cfc6] bg-[#ddd8cf]" />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <p className="truncate text-sm leading-none font-bold text-[#b0a898]">
+            Empty
+          </p>
+          <p className="truncate text-xs leading-none text-[#c0b8aa]">
+            Waiting…
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -59,7 +89,13 @@ const PHASE_LABELS: Record<number, string> = {
 
 export function MainMenuScreen(): JSX.Element {
   const { navigateTo } = useNavigation();
-  const { gameState, loading, error } = useGameState(1, { pollIntervalMs: 1_000 });
+  const { address } = useWallet();
+  const { gameState, loading, error } = useGameState({ pollIntervalMs: 1_000 });
+
+  const players = useMemo(
+    () => buildPlayerEntries(gameState, address),
+    [gameState, address],
+  );
 
   /**
    * Navigates the user into the game screen.
@@ -68,10 +104,11 @@ export function MainMenuScreen(): JSX.Element {
     navigateTo("game");
   };
 
-  const playerCount = gameState?.playerCount ?? PLAYER_ENTRIES.length;
+  const playerCount = gameState?.playerCount ?? 0;
   const currentRound = gameState?.currentRound ?? 0;
   const phase = gameState?.phase ?? 0;
   const phaseLabel = PHASE_LABELS[phase] ?? "Unknown";
+  const gameInProgress = phase >= 1 && phase <= 3;
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-4 py-4">
@@ -105,8 +142,8 @@ export function MainMenuScreen(): JSX.Element {
 
           {/* 4x5 player grid */}
           <div className="grid grid-cols-4 grid-rows-5 gap-1 px-1.5 py-1">
-            {PLAYER_ENTRIES.map((player) => (
-              <PlayerCard key={player.id} player={player} />
+            {players.map((player) => (
+              <PlayerCard key={player.id} player={player} empty={!player.occupied} />
             ))}
           </div>
         </div>
@@ -119,7 +156,7 @@ export function MainMenuScreen(): JSX.Element {
           onClick={handleStartGame}
           className="rounded-2xl bg-[#2f7a3f] px-10 py-3 text-lg font-bold text-[#f6fff8] shadow-[0_4px_24px_rgba(47,122,63,0.4)] transition-all duration-200 hover:scale-[1.03] hover:bg-[#275f33] active:scale-[0.98]"
         >
-          Start Game
+          {gameInProgress ? "Start Game" : "Join Game"}
         </button>
       </div>
     </div>

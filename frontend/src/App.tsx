@@ -1,6 +1,7 @@
 import type { JSX } from "react";
 import { NavigationProvider, useNavigation } from "./context/NavigationContext";
 import type { Screen } from "./context/NavigationContext";
+import { WalletProvider } from "./context/WalletContext";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { LoginScreen } from "./screens/LoginScreen";
 import { MainMenuScreen } from "./screens/MainMenuScreen";
@@ -46,8 +47,10 @@ function ScreenRouter(): JSX.Element {
  */
 export default function App(): JSX.Element {
   return (
-    <NavigationProvider>
-      <ScreenRouter />
-    </NavigationProvider>
+    <WalletProvider>
+      <NavigationProvider>
+        <ScreenRouter />
+      </NavigationProvider>
+    </WalletProvider>
   );
 }

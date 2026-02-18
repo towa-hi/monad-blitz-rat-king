@@ -1,3 +1,3 @@
 /** Contract address for the deployed game contract. */
 export const GAME_CONTRACT_ADDRESS =
-  "0x918A3Aefd2FE520023ee46cdfc3D336e7ca90E83" as const;
+  "0x51bc85e66494Ea6daF7e490ac2d190932A4361DD" as const;
