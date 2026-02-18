@@ -1,0 +1,49 @@
+[
+  {
+    "type": "function",
+    "name": "leave",
+    "stateMutability": "nonpayable",
+    "inputs": [],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "commit",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "commitment",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "reveal",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "move",
+        "type": "uint8"
+      },
+      {
+        "name": "salt",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "closeRound",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "round",
+        "type": "uint8"
+      }
+    ],
+    "outputs": []
+  }
+]
