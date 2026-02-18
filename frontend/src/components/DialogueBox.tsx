@@ -24,7 +24,7 @@ export function DialogueBox(props: DialogueBoxProps): JSX.Element {
         <img
           src={props.portrait}
           alt={`${props.name} portrait`}
-          className="h-full w-full object-cover p-2"
+          className="h-full w-full object-cover"
         />
       </div>
       {/* Dialogue text */}
