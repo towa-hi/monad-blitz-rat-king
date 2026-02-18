@@ -20,8 +20,11 @@ import {
   isAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { fetchDecodedGameStateDump, type GameStateJson } from "./gameStateDump.ts";
-import pizzaRatActionsAbiRaw from "./abi/pizzaRatActions.json" with { type: "json" };
+import {
+  fetchDecodedGameStateDump,
+  type GameStateJson,
+} from "../shared/gameStateDump.ts";
+import pizzaRatActionsAbiRaw from "../shared/abi/pizzaRatActions.json" with { type: "json" };
 
 /**
  * Runtime configuration for the backend service.
