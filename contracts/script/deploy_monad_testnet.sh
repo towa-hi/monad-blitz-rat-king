@@ -10,8 +10,11 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 1
 fi
 
+# Export every variable loaded from env so `forge script` receives them.
+set -a
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
+set +a
 
 if [[ -z "${RPC_URL:-}" ]]; then
   echo "RPC_URL is required in ${ENV_FILE}" >&2

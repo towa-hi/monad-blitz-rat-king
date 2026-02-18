@@ -45,5 +45,109 @@
       }
     ],
     "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "advancePhaseIfNeeded",
+    "stateMutability": "nonpayable",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "advanced",
+        "type": "bool"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "phase",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "currentRound",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "phaseDeadline",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "LobbyClosed",
+    "inputs": [
+      {
+        "name": "playerCount",
+        "type": "uint16",
+        "indexed": false
+      },
+      {
+        "name": "startingRound",
+        "type": "uint8",
+        "indexed": false
+      },
+      {
+        "name": "commitDeadline",
+        "type": "uint64",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RoundPhaseAdvanced",
+    "inputs": [
+      {
+        "name": "round",
+        "type": "uint8",
+        "indexed": true
+      },
+      {
+        "name": "phase",
+        "type": "uint8",
+        "indexed": false
+      },
+      {
+        "name": "phaseDeadline",
+        "type": "uint64",
+        "indexed": false
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GameEnded",
+    "inputs": [
+      {
+        "name": "finalRound",
+        "type": "uint8",
+        "indexed": true
+      }
+    ],
+    "anonymous": false
   }
 ]

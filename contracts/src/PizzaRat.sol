@@ -43,10 +43,10 @@ contract PizzaRat is AccessControl {
     error RecipeSumMustEqualOneWad(uint256 providedSum);
 
     enum Phase {
+        Ended,
         Lobby,
         Commit,
         Reveal,
-        Ended,
         Cancelled
     }
 
@@ -104,8 +104,8 @@ contract PizzaRat is AccessControl {
     uint16 public immutable commitDurationSeconds;
     uint16 public immutable revealDurationSeconds;
     uint256 public immutable feeWei;
-    uint64 public immutable lobbyOpenedAt;
-    uint64 public immutable lobbyClosesAt;
+    uint64 public lobbyOpenedAt;
+    uint64 public lobbyClosesAt;
 
     Phase public phase;
     uint256 public currentGame;
@@ -179,13 +179,9 @@ contract PizzaRat is AccessControl {
         commitDurationSeconds = _commitDurationSeconds;
         revealDurationSeconds = _revealDurationSeconds;
         feeWei = _feeWei;
-        lobbyOpenedAt = uint64(block.timestamp);
-        lobbyClosesAt = uint64(block.timestamp) + _lobbyDurationSeconds;
-        phase = Phase.Lobby;
+        phase = Phase.Ended;
         currentRecipeWad = _defaultRecipeWad();
         gameRecipeWad[currentGame] = currentRecipeWad;
-
-        emit LobbyOpened(lobbyOpenedAt, lobbyClosesAt);
     }
 
     function setCurrentRecipeWad(uint256[NUM_INGREDIENTS] calldata recipeWad) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -204,6 +200,9 @@ contract PizzaRat is AccessControl {
     }
 
     function join() external payable {
+        if (phase == Phase.Ended) {
+            _openLobby();
+        }
         _syncPhaseByTime();
         if (phase == Phase.Cancelled) {
             revert LobbyHasBeenCancelled();
@@ -462,9 +461,12 @@ contract PizzaRat is AccessControl {
         _scoreRound();
 
         if (currentRound >= maxRounds) {
+            uint8 finalRound = currentRound;
             phase = Phase.Ended;
+            currentRound = 0;
+            playerCount = 0;
             phaseDeadline = 0;
-            emit GameEnded(currentRound);
+            emit GameEnded(finalRound);
             currentGame += 1;
             gameRecipeWad[currentGame] = currentRecipeWad;
             return;
@@ -475,6 +477,17 @@ contract PizzaRat is AccessControl {
         phaseDeadline = uint64(block.timestamp) + commitDurationSeconds;
 
         emit RoundPhaseAdvanced(currentRound, Phase.Commit, phaseDeadline);
+    }
+
+    function _openLobby() internal {
+        phase = Phase.Lobby;
+        currentRound = 0;
+        playerCount = 0;
+        phaseDeadline = 0;
+        lobbyOpenedAt = uint64(block.timestamp);
+        lobbyClosesAt = uint64(block.timestamp) + lobbyDurationSeconds;
+
+        emit LobbyOpened(lobbyOpenedAt, lobbyClosesAt);
     }
 
     function _scoreRound() internal {

@@ -42,6 +42,7 @@ interface AppConfig {
   chain: Chain;
   rpcUrl: string;
   contractAddress: Address;
+  phaseWatchPollMs: number;
   backendAccount: Account;
   backendPublicClient: ReturnType<typeof createPublicClient>;
   backendWalletClient: ReturnType<typeof createWalletClient>;
@@ -118,6 +119,15 @@ interface ApiSuccessBody<TData> {
   data: TData;
 }
 
+/**
+ * Live phase tracker state read from chain.
+ */
+interface PhaseTrackerState {
+  phase: number;
+  currentRound: number;
+  phaseDeadline: bigint;
+}
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
@@ -125,6 +135,8 @@ const CORS_HEADERS: Record<string, string> = {
 };
 
 const ZERO_ETH_VALUE_HEX = "0x0";
+const PHASE_COMMIT = 1;
+const PHASE_REVEAL = 2;
 
 const PIZZA_RAT_ABI = pizzaRatActionsAbiRaw as Abi;
 
@@ -159,6 +171,26 @@ function parsePositiveInteger(rawValue: string, variableName: string): number {
   }
 
   return parsed;
+}
+
+/**
+ * Parses and validates a positive integer from an optional environment string.
+ * @param rawValue - Optional env string.
+ * @param fallback - Fallback value when env is missing.
+ * @param variableName - Env variable key for error messages.
+ * @returns Parsed positive integer.
+ * @throws If parsing fails or value is not positive.
+ */
+function parseOptionalPositiveInteger(
+  rawValue: string | undefined,
+  fallback: number,
+  variableName: string,
+): number {
+  if (rawValue === undefined || rawValue.trim().length === 0) {
+    return fallback;
+  }
+
+  return parsePositiveInteger(rawValue, variableName);
 }
 
 /**
@@ -230,6 +262,11 @@ function loadConfig(): AppConfig {
     "BACKEND_PORT",
   );
   const sqlitePath = Deno.env.get("SQLITE_PATH") ?? "./pizza-rat.sqlite3";
+  const phaseWatchPollMs = parseOptionalPositiveInteger(
+    Deno.env.get("BACKEND_PHASE_WATCH_POLL_MS"),
+    5000,
+    "BACKEND_PHASE_WATCH_POLL_MS",
+  );
 
   const privyClient = new PrivyClient({
     appId: privyAppId,
@@ -278,6 +315,7 @@ function loadConfig(): AppConfig {
     chain,
     rpcUrl,
     contractAddress,
+    phaseWatchPollMs,
     backendAccount,
     backendPublicClient,
     backendWalletClient,
@@ -752,12 +790,210 @@ async function simulateAndCloseRound(
 }
 
 /**
- * Reads and decodes game state dump from contract for a specific game.
- * @param config - App configuration.
- * @param gameNumber - Game number to fetch.
- * @returns Structured game-state JSON object.
- * @throws If contract call or decoding fails.
+ * Converts bigint or number into a non-negative safe integer number.
+ * @param value - Integer value.
+ * @param fieldName - Field label for error context.
+ * @returns Safe integer as number.
+ * @throws If value cannot be represented as a safe integer.
  */
+function toSafeIntegerNumber(value: bigint | number, fieldName: string): number {
+  if (typeof value === "number") {
+    if (Number.isSafeInteger(value) && value >= 0) {
+      return value;
+    }
+    throw new Error(`Invalid numeric field: ${fieldName}`);
+  }
+
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Numeric field out of range: ${fieldName}`);
+  }
+  return Number(value);
+}
+
+/**
+ * Reads current phase-related state from chain.
+ * @param config - App configuration.
+ * @returns Current phase tracker state.
+ * @throws If contract calls fail.
+ */
+async function readPhaseTrackerState(config: AppConfig): Promise<PhaseTrackerState> {
+  const [phaseRaw, currentRoundRaw, phaseDeadlineRaw] = await Promise.all([
+    config.backendPublicClient.readContract({
+      address: config.contractAddress,
+      abi: PIZZA_RAT_ABI,
+      functionName: "phase",
+      args: [],
+    }),
+    config.backendPublicClient.readContract({
+      address: config.contractAddress,
+      abi: PIZZA_RAT_ABI,
+      functionName: "currentRound",
+      args: [],
+    }),
+    config.backendPublicClient.readContract({
+      address: config.contractAddress,
+      abi: PIZZA_RAT_ABI,
+      functionName: "phaseDeadline",
+      args: [],
+    }),
+  ]);
+
+  return {
+    phase: toSafeIntegerNumber(phaseRaw as bigint | number, "phase"),
+    currentRound: toSafeIntegerNumber(
+      currentRoundRaw as bigint | number,
+      "currentRound",
+    ),
+    phaseDeadline: BigInt(phaseDeadlineRaw as bigint | number),
+  };
+}
+
+/**
+ * Reads latest chain timestamp in seconds.
+ * @param config - App configuration.
+ * @returns Latest block timestamp as bigint seconds.
+ * @throws If RPC call fails.
+ */
+async function readChainTimestampSeconds(config: AppConfig): Promise<bigint> {
+  const block = await config.backendPublicClient.getBlock();
+  return block.timestamp;
+}
+
+/**
+ * Checks whether backend auto-advance is relevant for the current phase.
+ * @param state - Current phase tracker state.
+ * @returns True if phase is Commit or Reveal and deadline exists.
+ */
+function shouldCheckPhaseDeadline(state: PhaseTrackerState): boolean {
+  return (
+    (state.phase === PHASE_COMMIT || state.phase === PHASE_REVEAL) &&
+    state.phaseDeadline > 0n
+  );
+}
+
+/**
+ * Waits asynchronously for a duration in milliseconds.
+ * @param milliseconds - Duration to wait.
+ * @returns Promise resolved after delay.
+ */
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve: () => void): void => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+/**
+ * Simulates and submits a backend-owned `advancePhaseIfNeeded()` call.
+ * @param config - App configuration.
+ * @returns True if transaction was sent and phase advanced.
+ * @throws If simulation or transaction submission fails.
+ */
+async function simulateAndAdvancePhaseIfNeeded(
+  config: AppConfig,
+): Promise<boolean> {
+  const simulation = await config.backendPublicClient.simulateContract({
+    address: config.contractAddress,
+    abi: PIZZA_RAT_ABI,
+    functionName: "advancePhaseIfNeeded",
+    args: [],
+    account: config.backendAccount,
+  });
+
+  if (!Boolean(simulation.result)) {
+    return false;
+  }
+
+  const txHash = await config.backendWalletClient.writeContract(simulation.request);
+  await config.backendPublicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log(`Auto phase advance tx mined: ${txHash}`);
+  return true;
+}
+
+/**
+ * Starts background event listeners and phase auto-advance loop.
+ * @param config - App configuration.
+ * @returns Nothing.
+ */
+function startPhaseAutoAdvanceWatcher(config: AppConfig): void {
+  let shouldRefreshState = true;
+  let cachedState: PhaseTrackerState = {
+    phase: 0,
+    currentRound: 0,
+    phaseDeadline: 0n,
+  };
+
+  config.backendPublicClient.watchContractEvent({
+    address: config.contractAddress,
+    abi: PIZZA_RAT_ABI,
+    eventName: "LobbyClosed",
+    onLogs: (): void => {
+      shouldRefreshState = true;
+      console.log("Watcher event: LobbyClosed");
+    },
+    onError: (error: unknown): void => {
+      console.error(`Watcher error (LobbyClosed): ${toErrorMessage(error)}`);
+    },
+  });
+
+  config.backendPublicClient.watchContractEvent({
+    address: config.contractAddress,
+    abi: PIZZA_RAT_ABI,
+    eventName: "RoundPhaseAdvanced",
+    onLogs: (): void => {
+      shouldRefreshState = true;
+      console.log("Watcher event: RoundPhaseAdvanced");
+    },
+    onError: (error: unknown): void => {
+      console.error(
+        `Watcher error (RoundPhaseAdvanced): ${toErrorMessage(error)}`,
+      );
+    },
+  });
+
+  config.backendPublicClient.watchContractEvent({
+    address: config.contractAddress,
+    abi: PIZZA_RAT_ABI,
+    eventName: "GameEnded",
+    onLogs: (): void => {
+      shouldRefreshState = true;
+      console.log("Watcher event: GameEnded");
+    },
+    onError: (error: unknown): void => {
+      console.error(`Watcher error (GameEnded): ${toErrorMessage(error)}`);
+    },
+  });
+
+  void (async (): Promise<void> => {
+    while (true) {
+      try {
+        if (shouldRefreshState) {
+          cachedState = await readPhaseTrackerState(config);
+          shouldRefreshState = false;
+        }
+
+        if (!shouldCheckPhaseDeadline(cachedState)) {
+          await sleep(config.phaseWatchPollMs);
+          continue;
+        }
+
+        const chainTimestamp = await readChainTimestampSeconds(config);
+        if (chainTimestamp < cachedState.phaseDeadline) {
+          await sleep(config.phaseWatchPollMs);
+          continue;
+        }
+
+        const advanced = await simulateAndAdvancePhaseIfNeeded(config);
+        if (advanced) {
+          shouldRefreshState = true;
+        }
+      } catch (error: unknown) {
+        console.error(`Phase watcher loop error: ${toErrorMessage(error)}`);
+      }
+
+      await sleep(config.phaseWatchPollMs);
+    }
+  })();
+}
 /**
  * Handles wallet registration.
  * @param request - Incoming request.
@@ -1133,6 +1369,7 @@ async function routeRequest(
 function startServer(): void {
   const config = loadConfig();
   const db = openDatabase(config.sqlitePath);
+  startPhaseAutoAdvanceWatcher(config);
 
   Deno.serve(
     {
